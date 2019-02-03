@@ -1,0 +1,105 @@
+# -*- coding: utf-8 -*-
+"""
+VNet for 3D segmentation 
+"V-Net: Fully Convolutional Neural Networks for Volumetric Medical Image Segmentation"
+"""
+
+from mxnet.gluon import nn
+from mxnet import nd
+
+class InputBlock3(nn.HybridBlock):
+    def __init__(self, out_channels, **kwargs):
+        super(InputBlock3, self).__init__(**kwargs)
+        self.out_channels = out_channels
+        with self.name_scope():
+            self.conv = nn.Conv3D(channels=out_channels, kernel_size=5, strides=1, padding=2, use_bias=False)
+            self.bn = nn.BatchNorm()
+            
+    def hybrid_forward(self, F, x):
+        l = [x for i in range(self.out_channels)]
+        skip_x = F.concat(*l, dim=1)
+        out = F.relu(self.bn(self.conv(x)))
+        return out + skip_x
+
+class OutputBlock3(nn.HybridBlock):
+    def __init__(self, out_channels, **kwargs):
+        super(OutputBlock3, self).__init__(**kwargs)
+        with self.name_scope():
+            self.conv = nn.Conv3D(channels=out_channels, kernel_size=1, strides=1, padding=0)
+            self.bn = nn.BatchNorm()
+    
+    def hybrid_forward(self, F, x):
+        return F.relu(self.bn(self.conv(x)))
+    
+class ResidualBlock3(nn.HybridBlock):
+    def __init__(self, out_channels, num_convs, **kwargs):
+        super(ResidualBlock3, self).__init__(**kwargs)
+        with self.name_scope():
+            self.ops = nn.HybridSequential()
+            for i in range(num_convs):
+                self.ops.add(nn.Conv3D(channels=out_channels, kernel_size=5, strides=1, padding=2, use_bias=False),
+                             nn.BatchNorm(),
+                             nn.Activation(activation='relu'))
+                
+    def hybrid_forward(self, F, x):
+        out = self.ops(x)
+        return x + out
+    
+class UpBlock3(nn.HybridBlock):
+    def __init__(self, out_channels, num_convs, **kwargs):
+        super(UpBlock3, self).__init__(**kwargs)
+        with self.name_scope():
+            self.up_conv = nn.Conv3DTranspose(channels=out_channels//2, kernel_size=2, strides=2, padding=0, use_bias=False)
+            self.up_bn = nn.BatchNorm()
+            self.rblock = ResidualBlock3(out_channels=out_channels, num_convs=num_convs)
+            
+    def hybrid_forward(self, F, x, skip_x):
+        out = F.relu(self.up_bn(self.up_conv(x)))
+        out = F.concat(out, skip_x, dim=1)
+        return self.rblock(out)
+        
+    
+class DownBlock3(nn.HybridBlock):
+    def __init__(self, out_channels, num_convs, **kwargs):
+        super(DownBlock3, self).__init__(**kwargs)
+        with self.name_scope():
+            self.down_conv = nn.Conv3D(channels=out_channels, kernel_size=2, strides=2, padding=0, use_bias=False)
+            self.down_bn = nn.BatchNorm()
+            self.rblock = ResidualBlock3(out_channels=out_channels, num_convs=num_convs)
+            
+    def hybrid_forward(self, F, x):
+        out = F.relu(self.down_bn(self.down_conv(x)))
+        return self.rblock(out)
+
+class VNet(nn.HybridBlock):
+    """vnet for 3D segmentation"""
+
+    def __init__(self, out_channels=2, **kwargs):
+        super(VNet, self).__init__(**kwargs)
+        with self.name_scope():
+            self.in_block = InputBlock3(out_channels=16)
+            self.down_32 = DownBlock3(out_channels=32, num_convs=2)
+            self.down_64 = DownBlock3(out_channels=64, num_convs=3)
+            self.down_128 = DownBlock3(out_channels=128, num_convs=3)
+            self.down_256 = DownBlock3(out_channels=256, num_convs=3)
+            self.up_256 = UpBlock3(out_channels=256, num_convs=3)
+            self.up_128 = UpBlock3(out_channels=128, num_convs=3)
+            self.up_64 = UpBlock3(out_channels=64, num_convs=2)
+            self.up_32 = UpBlock3(out_channels=32, num_convs=1)
+            self.out_block = OutputBlock3(out_channels=out_channels)
+
+    def hybrid_forward(self, F, x):
+        out16  =  self.in_block(x)
+        out32  =  self.down_32(out16)
+        out64  =  self.down_64(out32)
+        out128 =  self.down_128(out64)
+        out256 =  self.down_256(out128)
+        out    =  self.up_256(out256, out128)
+        out    =  self.up_128(out, out64)
+        out    =  self.up_64(out, out32)
+        out    =  self.up_32(out, out16)
+        out    =  self.out_block(out)
+        return out
+
+    def get_stride(self):
+        return 16
